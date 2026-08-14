@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.04);
+  }
+}
+
+@keyframes listening {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.09);
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.voice-breathe {
+  animation: breathe 3s ease-in-out infinite;
+}
+
+.voice-listening {
+  animation: listening 1.2s ease-in-out infinite;
+}
+
+.live-dot {
+  animation: blink 1s infinite;
+}
