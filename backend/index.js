@@ -4,8 +4,9 @@ import cors from "cors";
 import http from "http";
 import { WebSocketServer } from "ws";
 
-import DeepgramService from "./services/DeepgramService.js";
-import GeminiService from "./services/GeminiService.js";
+import DeepgramService from "./services/deepgramService.js";
+import GeminiService from "./services/geminiService.js";
+import ElevenLabsService from "./services/elevenLabsServices.js";
 
 dotenv.config();
 
@@ -14,6 +15,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
+
 app.use(express.json());
 
 const server = http.createServer(app);
@@ -26,11 +28,18 @@ wss.on("connection", (ws) => {
   console.log("client connected");
 
   let deepgramService = null;
+
   let geminiService = null;
 
+  let elevenLabsService = null;
+
   let callStarted = false;
+
   let isRecording = false;
 
+  /*
+   * CONNECTED
+   */
   ws.send(
     JSON.stringify({
       type: "connected",
@@ -38,6 +47,9 @@ wss.on("connection", (ws) => {
     }),
   );
 
+  /*
+   * CLIENT MESSAGE
+   */
   ws.on("message", async (message, isBinary) => {
     /*
      * AUDIO
@@ -48,24 +60,18 @@ wss.on("connection", (ws) => {
       }
 
       if (!deepgramService) {
-        console.log(
-          "❌ Deepgram service does not exist",
-        );
+        console.log("❌ Deepgram service does not exist");
+
         return;
       }
 
       if (!deepgramService.isConnected) {
-        console.log(
-          "❌ Deepgram is not connected",
-        );
+        console.log("❌ Deepgram is not connected");
+
         return;
       }
 
-      console.log(
-        "Audio received:",
-        message.length,
-        "bytes",
-      );
+      console.log("🎵 Audio received:", message.length, "bytes");
 
       deepgramService.sendAudio(message);
 
@@ -73,17 +79,12 @@ wss.on("connection", (ws) => {
     }
 
     /*
-     * JSON MESSAGE
+     * JSON
      */
     try {
-      const data = JSON.parse(
-        message.toString(),
-      );
+      const data = JSON.parse(message.toString());
 
-      console.log(
-        "Message from client:",
-        data,
-      );
+      console.log("Message from client:", data);
 
       /*
        * START CALL
@@ -91,48 +92,81 @@ wss.on("connection", (ws) => {
       if (data.type === "start_call") {
         console.log("📞 Call started");
 
+        /*
+         * IMPORTANT:
+         * Set this BEFORE anything else.
+         */
         callStarted = true;
+
         isRecording = false;
 
         /*
-         * Create Gemini service
+         * ELEVENLABS
          */
-        geminiService = new GeminiService(ws);
+        elevenLabsService = new ElevenLabsService(ws);
+
+        try {
+          /*
+           * WAIT for ElevenLabs
+           * to actually connect.
+           */
+          await elevenLabsService.connect();
+
+          console.log("🔊 ElevenLabs ready");
+        } catch (error) {
+          console.error("❌ ElevenLabs connection failed:", error);
+
+          callStarted = false;
+
+          return;
+        }
 
         /*
-         * Create Deepgram service
+         * GEMINI
          */
-        deepgramService = new DeepgramService(
-          ws,
-          async (finalTranscript) => {
-            console.log(
-              "📝 Final user transcript:",
-              finalTranscript,
-            );
-
-            if (!geminiService) {
-              console.log(
-                "❌ Gemini service does not exist",
-              );
-
-              return;
-            }
-
-            await geminiService.generateResponse(
-              finalTranscript,
-            );
-          },
-        );
+        geminiService = new GeminiService(ws, elevenLabsService);
 
         /*
-         * Connect Deepgram
+         * DEEPGRAM
          */
+        deepgramService = new DeepgramService(ws, async (finalTranscript) => {
+          if (!geminiService) {
+            return;
+          }
+
+          /*
+           * User finished speaking.
+           */
+          isRecording = false;
+
+          console.log("🤖 Sending transcript to Gemini...");
+
+          await geminiService.generateResponse(finalTranscript);
+        });
+
         deepgramService.connect();
 
         /*
-         * Start Gemini conversation
+         * WELCOME MESSAGE
          */
-        await geminiService.startConversation();
+        const welcomeMessage =
+          "Hi, I'm Niva. I'll ask you a few simple questions about how you're feeling. There are no right or wrong answers. To start, could you tell me what health concern or symptom is bothering you the most right now?";
+
+        /*
+         * Send text to frontend
+         */
+        ws.send(
+          JSON.stringify({
+            type: "ai_response",
+            text: welcomeMessage,
+          }),
+        );
+
+        /*
+         * Speak ONLY after ElevenLabs
+         * is confirmed connected.
+         */
+        elevenLabsService.speak(welcomeMessage);
 
         return;
       }
@@ -142,20 +176,22 @@ wss.on("connection", (ws) => {
        */
       if (data.type === "start_recording") {
         if (!callStarted) {
-          console.log(
-            "❌ Call has not started",
-          );
+          console.log("❌ Call has not started");
 
           return;
         }
 
-        if (
-          !deepgramService ||
-          !deepgramService.isConnected
-        ) {
-          console.log(
-            "❌ Deepgram is not connected",
-          );
+        if (!deepgramService || !deepgramService.isConnected) {
+          console.log("❌ Deepgram is not connected");
+
+          return;
+        }
+
+        /*
+         * Prevent duplicate starts.
+         */
+        if (isRecording) {
+          console.log("⚠️ Already recording");
 
           return;
         }
@@ -171,9 +207,7 @@ wss.on("connection", (ws) => {
        * STOP RECORDING
        */
       if (data.type === "stop_recording") {
-        console.log(
-          "⏹️ Recording stopped",
-        );
+        console.log("⏹️ Recording stopped");
 
         isRecording = false;
 
@@ -191,26 +225,38 @@ wss.on("connection", (ws) => {
         console.log("📞 Call ended");
 
         callStarted = false;
+
         isRecording = false;
 
+        /*
+         * Deepgram
+         */
         if (deepgramService) {
           deepgramService.close();
+
           deepgramService = null;
         }
 
+        /*
+         * ElevenLabs
+         */
+        if (elevenLabsService) {
+          elevenLabsService.close();
+
+          elevenLabsService = null;
+        }
+
+        /*
+         * Gemini
+         */
         if (geminiService) {
-          geminiService.reset();
           geminiService = null;
         }
 
         return;
       }
-
     } catch (error) {
-      console.error(
-        "❌ Message processing error:",
-        error,
-      );
+      console.error("❌ Message processing error:", error);
     }
   });
 
@@ -218,39 +264,43 @@ wss.on("connection", (ws) => {
    * CLIENT DISCONNECTED
    */
   ws.on("close", () => {
-    console.log(
-      "client disconnected",
-    );
+    console.log("client disconnected");
 
     callStarted = false;
+
     isRecording = false;
 
     if (deepgramService) {
       deepgramService.close();
+
       deepgramService = null;
     }
 
     if (geminiService) {
-      geminiService.reset();
+      if (typeof geminiService.reset === "function") {
+        geminiService.reset();
+      }
+
       geminiService = null;
+    }
+
+    if (elevenLabsService) {
+      elevenLabsService.close();
+
+      elevenLabsService = null;
     }
   });
 
+  /*
+   * WEBSOCKET ERROR
+   */
   ws.on("error", (error) => {
-    console.error(
-      "❌ WebSocket error:",
-      error,
-    );
+    console.error("❌ WebSocket error:", error);
   });
 });
 
 server.listen(port, () => {
-  console.log(
-    `🚀 Server running on port ${port}`,
-  );
+  console.log(`🚀 Server running on port ${port}`);
 
-  console.log(
-    `🔌 WebSocket running on port ${port}`,
-  );
+  console.log(`🔌 WebSocket running on port ${port}`);
 });
-

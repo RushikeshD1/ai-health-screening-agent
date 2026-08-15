@@ -1,215 +1,201 @@
 import { GoogleGenAI } from "@google/genai";
 
 class GeminiService {
-  constructor(clientSocket) {
+  constructor(clientSocket, elevenLabsService) {
     this.clientSocket = clientSocket;
+    this.elevenLabsService = elevenLabsService;
 
     this.ai = new GoogleGenAI({
       apiKey: process.env.GEMINI_API_KEY,
     });
 
+    // Store conversation for this call
     this.conversation = [];
-    this.questionCount = 0;
-    this.maxQuestions = 6;
-    this.minQuestions = 4;
 
-    this.isCompleted = false;
+    // Number of questions Niva has asked
+    this.questionCount = 0;
+
+    // Maximum questions — enforced in code below, not just in the
+    // prompt, so the model can't wander past this on its own.
+    this.maxQuestions = 3;
+
+    // Minimum questions before we allow an early finish
+    this.minQuestions = 2;
+
+    // Screening completed
+    this.screeningCompleted = false;
   }
 
-  async startConversation() {
-    try {
-      this.conversation = [];
-      this.questionCount = 0;
-      this.isCompleted = false;
+  /*
+   * Detect whether an error from the Gemini API is a quota /
+   * rate-limit error (free tier exhausted) vs some other failure,
+   * so the frontend can show a specific "out of free tokens"
+   * message instead of a generic error.
+   */
+  isQuotaError(error) {
+    const status = error?.status || error?.code;
 
-      const firstQuestion =
-        "Hi, I'm Niva. I'll ask you a few simple questions about how you're feeling. There are no right or wrong answers. To start, could you tell me what health concern or symptom is bothering you the most right now?";
+    const message = (error?.message || "").toLowerCase();
 
-      this.conversation.push({
-        role: "assistant",
-        content: firstQuestion,
-      });
-
-      this.sendToClient({
-        type: "ai_response",
-        text: firstQuestion,
-      });
-
-      return firstQuestion;
-    } catch (error) {
-      console.error("❌ Failed to start conversation:", error);
-
-      this.sendToClient({
-        type: "ai_error",
-        message: "Sorry, I couldn't start the health conversation.",
-      });
-    }
+    return (
+      status === 429 ||
+      message.includes("resource_exhausted") ||
+      message.includes("quota") ||
+      message.includes("rate limit")
+    );
   }
 
   async generateResponse(userText) {
     try {
       if (!userText || !userText.trim()) {
-        return;
+        return null;
       }
 
       console.log("🤖 User:", userText);
 
-      // Store user response
+      // Add user's answer to conversation
       this.conversation.push({
         role: "user",
-        content: userText.trim(),
+        text: userText.trim(),
       });
 
-      /*
-       * Ask Gemini whether we have enough information.
-       */
-      const prompt = `
-You are Niva, a friendly AI health screening assistant.
+      // If screening is already completed, don't ask more questions
+      if (this.screeningCompleted) {
+        console.log("⚠️ Screening already completed");
+        return null;
+      }
 
-Your job is to have a short, friendly health screening conversation.
+      /*
+       * HARD CAP: if we've already asked the max number of
+       * questions, don't even ask the model — go straight to the
+       * report. This guarantees the call never asks more than
+       * `maxQuestions`, regardless of what the model decides.
+       */
+      if (this.questionCount >= this.maxQuestions) {
+        console.log(
+          "✅ Max questions reached (",
+          this.maxQuestions,
+          "), finishing screening"
+        );
+
+        this.screeningCompleted = true;
+
+        await this.generateHealthReport();
+
+        return "SCREENING_COMPLETE";
+      }
+
+      const conversationText = this.conversation
+        .map((message) => {
+          return `${message.role === "user" ? "User" : "Niva"}: ${
+            message.text
+          }`;
+        })
+        .join("\n");
+
+      const prompt = `
+You are Niva, a friendly AI voice assistant conducting a basic health screening.
+
+Your job is to ask the user ${this.minQuestions} to ${this.maxQuestions} simple health-related questions.
 
 IMPORTANT RULES:
 
-1. Ask simple basic health questions only.
-2. Do NOT diagnose the user.
-3. Do NOT prescribe medicines.
-4. Do NOT give dangerous medical advice.
-5. Ask ONE question at a time.
-6. Usually ask between 4 and 6 questions.
-7. Keep questions natural and conversational.
-8. Use information from previous answers.
-9. Do not repeatedly ask the same question.
-10. If you already have enough information after 4 questions, you may finish.
-11. You MUST finish by question 6 at the latest.
-12. Ask about things such as:
-   - main symptom/problem
-   - when it started
-   - severity
-   - other related symptoms
-   - things that make it better/worse
-   - relevant basic context
-13. Avoid asking unnecessary personal questions.
-14. If the user mentions an emergency or severe alarming symptoms, prioritize telling them to seek urgent professional medical care rather than continuing the screening.
+1. Ask ONLY ONE question at a time.
+2. Keep every response short and natural because it will be spoken aloud.
+3. Do not ask multiple questions in one response.
+4. Use the user's previous answers to decide the next question.
+5. Ask a maximum of ${this.maxQuestions} questions in total. This is a hard limit — do not go past it.
+6. You may finish earlier than ${this.maxQuestions} once you have asked at least ${this.minQuestions} questions and have enough information.
+7. Do not diagnose the user.
+8. Do not give a long medical explanation.
+9. When enough information has been collected (or you have reached ${this.maxQuestions} questions), respond with exactly:
+SCREENING_COMPLETE
 
-Current question number: ${this.questionCount + 1}
+Current conversation:
 
-Conversation so far:
+${conversationText}
 
-${this.conversation
-  .map(
-    (message) =>
-      `${message.role.toUpperCase()}: ${message.content}`,
-  )
-  .join("\n")}
+Niva has currently asked ${this.questionCount} questions out of a maximum of ${this.maxQuestions}.
 
 Decide what to do next.
 
-Return ONLY valid JSON in this exact format:
+If another question is needed and the limit has not been reached:
+- Ask exactly ONE simple question.
 
-{
-  "finished": false,
-  "response": "Your next friendly question"
-}
-
-OR, when enough information has been collected:
-
-{
-  "finished": true,
-  "response": "A short friendly closing message"
-}
-
-Do not use markdown.
+If enough information has been collected, or the question limit has been reached:
+- Respond ONLY with SCREENING_COMPLETE.
 `;
 
       const response = await this.ai.models.generateContent({
-        model: "gemini-3.6-flash",
+        model: "gemini-3.1-flash-lite",
         contents: prompt,
       });
 
-      const rawText = response.text?.trim();
+      const text = response.text?.trim();
 
-      if (!rawText) {
+      if (!text) {
         throw new Error("Gemini returned an empty response");
       }
 
-      console.log("🤖 Gemini raw:", rawText);
+      console.log("🤖 Gemini response:", text);
 
-      const cleaned = rawText
-        .replace(/```json/g, "")
-        .replace(/```/g, "")
-        .trim();
-
-      let result;
-
-      try {
-        result = JSON.parse(cleaned);
-      } catch (error) {
-        console.error("❌ Gemini JSON parse error:", error);
-
-        // Fallback
-        result = {
-          finished: this.questionCount >= this.maxQuestions,
-          response: rawText,
-        };
-      }
-
-      /*
-       * Increase question count after receiving user answer.
-       */
-      this.questionCount++;
-
-      /*
-       * Force completion at 6 questions.
-       */
-      if (this.questionCount >= this.maxQuestions) {
-        result.finished = true;
-      }
-
-      /*
-       * If conversation is not finished,
-       * send next question.
-       */
-      if (!result.finished) {
-        const nextQuestion = result.response?.trim();
-
-        if (!nextQuestion) {
-          throw new Error("Gemini returned an empty question");
-        }
-
-        this.conversation.push({
-          role: "assistant",
-          content: nextQuestion,
-        });
-
+      if (text === "SCREENING_COMPLETE") {
         console.log(
-          `🤖 Question ${this.questionCount + 1}:`,
-          nextQuestion,
+          "✅ Screening completed after",
+          this.questionCount,
+          "questions",
         );
 
-        this.sendToClient({
-          type: "ai_response",
-          text: nextQuestion,
-        });
+        this.screeningCompleted = true;
 
-        return;
+        await this.generateHealthReport();
+
+        return "SCREENING_COMPLETE";
       }
 
-      /*
-       * Conversation finished.
-       */
-      console.log("✅ Health screening completed");
+      this.questionCount++;
 
-      this.isCompleted = true;
+      console.log(`❓ Question ${this.questionCount}:`, text);
 
-      await this.generateHealthReport();
+      // Store Niva's response
+      this.conversation.push({
+        role: "assistant",
+        text,
+      });
 
+      // Send text to frontend
+      this.sendToClient({
+        type: "ai_response",
+        text,
+      });
+
+      // Speak using ElevenLabs
+      if (this.elevenLabsService) {
+        await this.elevenLabsService.speak(text);
+      }
+
+      return text;
     } catch (error) {
       console.error("❌ Gemini error:", error);
+
+      if (this.isQuotaError(error)) {
+        console.log("⚠️ Gemini quota/rate limit hit");
+
+        this.sendToClient({
+          type: "quota_exceeded",
+          message:
+            "We've run out of free AI usage for now. Please try again later.",
+        });
+
+        return null;
+      }
 
       this.sendToClient({
         type: "ai_error",
         message: "Sorry, I couldn't generate a response.",
       });
+
+      return null;
     }
   }
 
@@ -217,42 +203,53 @@ Do not use markdown.
     try {
       console.log("📋 Generating final health report...");
 
-      const reportPrompt = `
-You are Niva, a friendly health screening assistant.
+      const conversationText = this.conversation
+        .map((message) => {
+          return `${message.role === "user" ? "User" : "Niva"}: ${
+            message.text
+          }`;
+        })
+        .join("\n");
 
-Create a simple final health screening report based ONLY on the conversation below.
+      const reportPrompt = `
+You are generating a basic health screening summary.
+
+Review the conversation below.
+
+${conversationText}
+
+Create a simple informational screening report.
+
+Return ONLY valid JSON.
+
+Use exactly this structure:
+
+{
+  "summary": "Short summary of what the user reported",
+  "possibleConcerns": [
+    "Possible concern 1"
+  ],
+  "cautions": [
+    "Caution or precaution the user should take, based only on what they described"
+  ],
+  "recommendations": [
+    "Recommendation 1",
+    "Recommendation 2"
+  ],
+  "whenToSeekHelp": "When the user should consider professional medical help"
+}
+
+For "cautions", list 1 to 3 general precautions relevant to what the user
+described (e.g. things to avoid, warning signs to watch for, general safety
+notes). Keep each one short and practical, and speak generally rather than
+prescribing specific treatment.
 
 IMPORTANT:
 
-- Do NOT diagnose a disease.
+- Do NOT diagnose the user.
 - Do NOT claim certainty.
-- Do NOT prescribe medication.
-- Do NOT invent symptoms.
-- Clearly distinguish what the user reported from possible general considerations.
-- Recommend seeing a qualified healthcare professional when appropriate.
-- If the user mentioned potentially urgent symptoms, clearly recommend urgent medical attention.
-- Keep the report easy to understand.
-
-The report should contain:
-
-1. Summary
-2. Main concern
-3. Symptoms mentioned
-4. What may be worth paying attention to
-5. What the client can do next
-6. When to seek professional medical help
-
-Conversation:
-
-${this.conversation
-  .map(
-    (message) =>
-      `${message.role.toUpperCase()}: ${message.content}`,
-  )
-  .join("\n")}
-
-Return the report as normal readable text.
-Do not use JSON.
+- Base the report only on what the user said.
+- Keep it concise.
 `;
 
       const response = await this.ai.models.generateContent({
@@ -260,59 +257,157 @@ Do not use JSON.
         contents: reportPrompt,
       });
 
-      const report = response.text?.trim();
+      let text = response.text?.trim();
 
-      if (!report) {
-        throw new Error("Gemini returned an empty health report");
+      if (!text) {
+        throw new Error("Gemini returned empty health report");
       }
 
-      console.log("📋 Final health report:");
-      console.log(report);
+      // Remove markdown code fences if Gemini adds them
+      text = text
+        .replace(/^```json\s*/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
 
-      /*
-       * Tell the user the conversation is complete.
-       */
-      const closingMessage =
-        "Thank you for sharing that with me. This is your final health screening report, and I'll share it with you now. Feel free to ask Niva anything at any time.";
+      let report;
+
+      try {
+        report = JSON.parse(text);
+      } catch (error) {
+        console.error("❌ Failed to parse health report JSON:", text);
+
+        throw new Error("Invalid health report JSON");
+      }
+
+      console.log("📋 Health report generated:", report);
+
+      // Speak a short closing summary before showing the written report,
+      // so the call doesn't just end abruptly after the last question.
+      const closingText = this.buildClosingMessage(report);
+
+      console.log("🗣️ Closing message:", closingText);
 
       this.sendToClient({
         type: "ai_response",
-        text: closingMessage,
+        text: closingText,
       });
 
-      /*
-       * Send final report separately.
-       */
+      if (this.elevenLabsService) {
+        await this.elevenLabsService.speak(closingText);
+      }
+
       this.sendToClient({
         type: "health_report",
         report,
       });
 
+      this.sendToClient({
+        type: "screening_completed",
+      });
+
+      return report;
     } catch (error) {
       console.error("❌ Health report error:", error);
 
+      if (this.isQuotaError(error)) {
+        console.log("⚠️ Gemini quota/rate limit hit during report");
+
+        this.sendToClient({
+          type: "quota_exceeded",
+          message:
+            "We've run out of free AI usage for now, so the report couldn't be generated. Please try again later.",
+        });
+
+        return null;
+      }
+
       this.sendToClient({
         type: "ai_error",
-        message: "Sorry, I couldn't generate your health report.",
+        message: "Unable to generate the health report.",
       });
+
+      return null;
     }
   }
 
-  sendToClient(data) {
-    if (
-      this.clientSocket &&
-      this.clientSocket.readyState === 1
+  /*
+   * Build a short, natural closing line to be SPOKEN after the
+   * screening finishes — separate from the written report shown
+   * on screen. Keeps it to 1-2 sentences since it's read aloud.
+   */
+  buildClosingMessage(report) {
+    const parts = [
+      "Thanks, I've got everything I need for now.",
+    ];
+
+    if (report.cautions && report.cautions.length > 0) {
+      parts.push(report.cautions[0]);
+    } else if (
+      report.recommendations &&
+      report.recommendations.length > 0
     ) {
-      this.clientSocket.send(
-        JSON.stringify(data),
-      );
+      parts.push(report.recommendations[0]);
+    }
+
+    parts.push(
+      "If things get worse or you have any concerns, feel free to start a new call anytime."
+    );
+
+    return parts.join(" ");
+  }
+
+  async startScreening() {
+    try {
+      this.conversation = [];
+      this.questionCount = 0;
+      this.screeningCompleted = false;
+
+      const firstQuestion =
+        "Hi, I'm Niva. I'll ask you a few simple questions about how you're feeling. There are no right or wrong answers. To start, could you tell me what health concern or symptom is bothering you the most right now?";
+
+      this.questionCount++;
+
+      this.conversation.push({
+        role: "assistant",
+        text: firstQuestion,
+      });
+
+      console.log("❓ Question 1:", firstQuestion);
+
+      this.sendToClient({
+        type: "ai_response",
+        text: firstQuestion,
+      });
+
+      if (this.elevenLabsService) {
+        await this.elevenLabsService.speak(firstQuestion);
+      }
+
+      return firstQuestion;
+    } catch (error) {
+      console.error("❌ Start screening error:", error);
+
+      return null;
     }
   }
 
   reset() {
+    console.log("🔄 Resetting Gemini screening");
+
     this.conversation = [];
     this.questionCount = 0;
-    this.isCompleted = false;
+    this.screeningCompleted = false;
+  }
+
+  sendToClient(data) {
+    if (this.clientSocket && this.clientSocket.readyState === 1) {
+      try {
+        this.clientSocket.send(JSON.stringify(data));
+      } catch (error) {
+        console.error("❌ Failed to send Gemini message:", error);
+      }
+    }
   }
 }
 
