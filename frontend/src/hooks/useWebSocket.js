@@ -142,7 +142,7 @@ const useWebSocket = () => {
   };
 
   useEffect(() => {
-    const socket = new WebSocket("ws://localhost:3000");
+    const socket = new WebSocket('wss://ai-health-backend-54iv.onrender.com');
 
     socketRef.current = socket;
 
