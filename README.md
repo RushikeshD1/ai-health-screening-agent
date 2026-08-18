@@ -310,11 +310,11 @@ npm install
 Create a `.env` file inside the `backend` directory.
 
 ```env
-GEMINI_API_KEY=AQ.Ab8RN6I0tsFGrfpL2HPJSSWNfDGNPTu7OC8Z2gfj8DFGLLikQA
-DEEPGRAM_API_KEY=bc155359881bc724a168667654e3a8ff84390d54
-ELEVENLABS_API_KEY=sk_53e9981426784a591b88be5b5286739db0d2c08f492793f4
-ELEVENLABS_VOICE_ID=QZ2iwiC1UacfGIvwSy4A
-PORT=3000
+GEMINI_API_KEY=
+DEEPGRAM_API_KEY=
+ELEVENLABS_API_KEY=
+ELEVENLABS_VOICE_ID=
+PORT=
 ```
 
 Start the backend:
@@ -382,7 +382,7 @@ Used for generating AI responses and health screening questions.
 Environment variable:
 
 ```env
-GEMINI_API_KEY=AQ.Ab8RN6I0tsFGrfpL2HPJSSWNfDGNPTu7OC8Z2gfj8DFGLLikQA
+GEMINI_API_KEY=
 ```
 
 ---
@@ -394,7 +394,7 @@ Used for converting the user's voice into text.
 Environment variable:
 
 ```env
-DEEPGRAM_API_KEY=bc155359881bc724a168667654e3a8ff84390d54
+DEEPGRAM_API_KEY=
 ```
 
 ---
@@ -406,8 +406,8 @@ Used for converting Niva's AI responses into speech.
 Environment variables:
 
 ```env
-ELEVENLABS_API_KEY=sk_53e9981426784a591b88be5b5286739db0d2c08f492793f4
-ELEVENLABS_VOICE_ID=QZ2iwiC1UacfGIvwSy4A
+ELEVENLABS_API_KEY=
+ELEVENLABS_VOICE_ID=
 ```
 
 ---
